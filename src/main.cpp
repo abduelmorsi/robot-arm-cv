@@ -22,7 +22,7 @@ void setup() {
   servos[3] = ringServo;
   servos[4] = pinkyServo;
   
-  int servoPins[] = {3, 5, 6, 9, 10};
+  int servoPins[] = {7, 6, 5, 4, 3};
   for(int i = 0; i < NUM_SERVOS; i++) {
     servos[i].attach(servoPins[i]);
     servos[i].write(MIN_ANGLE);  
