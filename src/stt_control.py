@@ -1,4 +1,6 @@
-import openai
+from openai import OpenAI
+
+
 import sounddevice as sd
 import numpy as np
 import queue
@@ -15,14 +17,56 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("Please set the OPENAI_API_KEY in your .env file")
-openai.api_key = OPENAI_API_KEY
-
+client = OpenAI(api_key=OPENAI_API_KEY)
 # Audio recording parameters
 SAMPLE_RATE = 16000
 CHANNELS = 1
 DURATION = 5  # seconds per command
 
 audio_queue = queue.Queue()
+
+# Microphone selection
+def list_microphones():
+    """List all available microphones"""
+    devices = sd.query_devices()
+    input_devices = []
+    
+    print("\n🎤 Available microphones:")
+    for i, device in enumerate(devices):
+        if device['max_input_channels'] > 0:
+            input_devices.append((i, device))
+            print(f"  {len(input_devices)-1}: {device['name']} (ID: {i})")
+    
+    return input_devices
+
+def select_microphone():
+    """Let user select a microphone"""
+    input_devices = list_microphones()
+    
+    if not input_devices:
+        print("❌ No input devices found!")
+        return None
+    
+    try:
+        choice = input(f"\nSelect microphone (0-{len(input_devices)-1}) or press Enter for default: ").strip()
+        
+        if choice == "":
+            print("Using default microphone")
+            return None
+        
+        choice = int(choice)
+        if 0 <= choice < len(input_devices):
+            device_id = input_devices[choice][0]
+            device_name = input_devices[choice][1]['name']
+            print(f"✅ Selected: {device_name}")
+            return device_id
+        else:
+            print("❌ Invalid choice, using default")
+            return None
+            
+    except ValueError:
+        print("❌ Invalid input, using default")
+        return None
 
 # Find Arduino port
 
@@ -49,11 +93,30 @@ except Exception as e:
 
 # Record audio
 
-def record_audio(duration=DURATION):
-    print(f"Recording for {duration} seconds...")
-    recording = sd.rec(int(duration * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=CHANNELS, dtype='int16')
+def record_audio(duration=DURATION, device_id=None):
+    print(f"Recording for {duration} seconds... Speak clearly!")
+    print("3... 2... 1... GO!")
+    time.sleep(1)  # Give user time to prepare
+    
+    recording = sd.rec(
+        int(duration * SAMPLE_RATE), 
+        samplerate=SAMPLE_RATE, 
+        channels=CHANNELS, 
+        dtype='float32',
+        device=device_id
+    )
     sd.wait()
-    return recording.flatten()
+    
+    # Check audio level
+    audio_level = np.max(np.abs(recording))
+    print(f"Audio level: {audio_level:.4f}")
+    
+    if audio_level < 0.01:
+        print("⚠️ Warning: Audio level very low. Speak louder or check microphone.")
+    
+    # Convert to int16 for compatibility
+    recording_int16 = (recording * 32767).astype(np.int16)
+    return recording_int16.flatten()
 
 # Send audio to Whisper API
 
@@ -66,49 +129,86 @@ def transcribe_audio(audio_data):
             wf.setsampwidth(2)
             wf.setframerate(SAMPLE_RATE)
             wf.writeframes(audio_data.tobytes())
-        audio_file = open(tmp.name, 'rb')
-        transcript = openai.Audio.transcribe("whisper-1", audio_file)
-        audio_file.close()
-    return transcript['text']
+        with open(tmp.name, 'rb') as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file
+            )
+    return transcript.text
 
 # Map text command to servo angles
 
 def command_to_angles(command):
     # Simple mapping, expand as needed
-    command = command.lower()
-    if "open hand" in command:
+    command = command.lower().strip()
+    
+    print(f"Processing command: '{command}'")
+    
+    # More flexible matching
+    if any(word in command for word in ["open", "open hand", "spread", "aç"]):
         return [0, 0, 0, 0, 0]
-    elif "close hand" in command:
+    elif any(word in command for word in ["close", "fist", "close hand", "clench"]):
         return [180, 180, 180, 180, 180]
-    elif "thumb up" in command:
+    elif any(word in command for word in ["thumb up", "thumbs up", "like"]):
         return [0, 180, 180, 180, 180]
-    elif "peace" in command:
+    elif any(word in command for word in ["peace", "victory", "two"]):
         return [180, 0, 0, 180, 180]
+    elif any(word in command for word in ["point", "pointing", "index"]):
+        return [180, 0, 180, 180, 180]
+    elif any(word in command for word in ["ok", "okay", "circle"]):
+        return [0, 0, 180, 180, 180]
     # Add more commands as needed
     else:
-        print(f"Unknown command: {command}")
+        print(f"Unknown command: '{command}'")
+        print("Available commands: open hand, close hand, thumb up, peace, point, ok")
         return None
 
 # Main loop
 
 def main():
-    print("Say a command (e.g., 'open hand', 'close hand', 'thumb up', 'peace')...")
+    print("🎤 Voice-Controlled Robot Arm")
+    
+    # Select microphone
+    selected_mic = select_microphone()
+    
+    print("\nAvailable commands:")
+    print("  - 'open hand' or 'open'")
+    print("  - 'close hand' or 'fist'")
+    print("  - 'thumb up' or 'like'")
+    print("  - 'peace' or 'victory'")
+    print("  - 'point' or 'pointing'")
+    print("  - 'ok' or 'okay'")
+    print("\nPress Ctrl+C to exit\n")
+    
     while True:
-        audio_data = record_audio()
         try:
+            input("Press Enter to start recording...")
+            audio_data = record_audio(device_id=selected_mic)
+            
+            print("🔄 Transcribing...")
             text = transcribe_audio(audio_data)
-            print(f"Recognized: {text}")
+            print(f"📝 Recognized: '{text}'")
+            
+            if text.strip() == "" or text.strip() in [".", ",", "!"]:
+                print("❌ No speech detected. Try speaking louder or closer to microphone.")
+                continue
+                
             angles = command_to_angles(text)
             if angles:
                 command = ','.join(map(str, angles)) + '\n'
                 arduino.write(command.encode())
                 arduino.flush()
-                print(f"Sent angles: {angles}")
+                print(f"🤖 Sent to robot: {angles}")
+                print("✅ Command executed!\n")
             else:
-                print("No valid command recognized.")
+                print("❌ No valid command recognized.\n")
+                
+        except KeyboardInterrupt:
+            print("\n👋 Goodbye!")
+            break
         except Exception as e:
-            print(f"Error: {e}")
-        time.sleep(1)
+            print(f"❌ Error: {e}")
+            print("Continuing...\n")
 
 if __name__ == "__main__":
     main()
